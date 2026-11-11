@@ -30,13 +30,18 @@ test('Weight Match consumes Preview Rating and exposes explicit DTXR mode', asyn
   assert.doesNotMatch(source, /xmlCiiWeightMatchRatingFromConfig/);
   assert.doesNotMatch(source, /processRating\(/);
   assert.doesNotMatch(source, /overrideValue\(config,\s*'rating'/);
-  assert.match(source, /xml-cii-wm-cache-v2-preview-rating/);
+  // v0.45: the v0.4 renderer bumped its weight cache key (review-choice preload).
+  assert.match(source, /xml-cii-wm-cache-v5-review-choice-preload/);
 });
 
 test('standalone Weight Match routes only through the shared renderer authority', async () => {
   const phaseSource = await read('tabs/xml-cii-2019-standalone/ui-adapted/xml-cii-adapted-phase-panels.js');
   const routeSource = await read('tabs/xml-cii-2019-standalone/ui-adapted/xml-cii-adapted-weight-match-v2.js');
-  assert.match(phaseSource, /renderAdaptedWeightMatchPanelV2/);
+  // v0.45: step 6 renders the unified Rigid Weight Review; InputXML still
+  // routes from there to the shared renderAdaptedWeightMatchPanelV2 route.
+  const unifiedSource = await read('tabs/xml-cii-2019-standalone/ui-adapted/xml-cii-adapted-phase6-unified-review.js');
+  assert.match(phaseSource, /renderUnifiedPhase6WeightReview/);
+  assert.match(unifiedSource, /renderAdaptedWeightMatchPanelV2/);
   assert.doesNotMatch(phaseSource, /renderAdaptedWeightMatchPanel\s+from\s+'\.\/xml-cii-adapted-weight-match\.js'/);
   assert.match(routeSource, /loadParentWeightMatchModules/);
   assert.match(routeSource, /xmlCiiRenderWeightMatchPhase/);

@@ -1,5 +1,7 @@
-import { collectXmlCiiWeightMatchRows } from '../../../../converters/xml-cii2019-core/weight-match-model.js?v=20260626-weight-review-2';
-import { applyXmlCiiFlangeWeightFallbackToIssue } from '../../../../converters/xml-cii2019-core/flange-weight-fallback.js?v=20260626-special-factor-guard-1';
+import { isApprovedPhysicalMassCandidate } from '../../../../converters/xml-cii2019-core/physical-mass-approval.js';
+import { availableWeightReviewChoices, comparisonWeightMasterReferences, preferredWeightReviewDraft, weightReviewChoiceLabel } from '../../../../converters/xml-cii2019-core/weight-review-choices.js?v=20261108-rigid-choice-buttons-1';
+import { collectXmlCiiWeightMatchRows, reconcileXmlCiiWeightMatchSourceBores } from '../../../../converters/xml-cii2019-core/weight-match-model.js?v=20261107-glrd-bore-family-r2';
+import { applyXmlCiiFlangeWeightFallbackToIssue } from '../../../../converters/xml-cii2019-core/flange-weight-fallback.js?v=20261107-nearest-known-family-1';
 import { applyXmlCiiStagedGeometryAuthority } from '../../../../converters/xml-cii2019-core/staged-geometry-authority.js?v=20260625-staged-geometry-1';
 import {
   readXmlCiiPreviewRatingSnapshot,
@@ -13,7 +15,7 @@ import {
   specialValveFactorRows,
   valveHintLengthToleranceMm,
   valveHintMappingRows,
-} from '../../../../converters/xml-cii2019-core/weight-valve-hints.js?v=20260626-weight-factor-1';
+} from '../../../../converters/xml-cii2019-core/weight-valve-hints.js?v=20261107-glrd-bore-family-r2';
 import { getXmlCiiPreviewRuntimeConfig } from '../../shared/preview-filldown.js?v=20260620-rating-runtime-1';
 
 function t(value) { return value === null || value === undefined ? '' : String(value); }
@@ -23,7 +25,7 @@ function attr(value) { return esc(value).replaceAll("'", '&#39;'); }
 function nfmt(value, digits = 1) { const numeric = Number(value); return Number.isFinite(numeric) ? numeric.toFixed(digits) : ''; }
 function selectedWeight(candidate) { return candidate?.selectedWeight ?? candidate?.suggestedWeight ?? candidate?.weight ?? ''; }
 function convOn(config) { return config?.weight?.convertSmallLengthsInToMm === true; }
-function allowedType(value) { const type = clean(value).toUpperCase(); return type === 'RIGID' || type.startsWith('FLAN') || type.startsWith('INST') || ['VALV', 'VALVE', 'VLV'].includes(type); }
+function allowedType(value) { const type = clean(value).toUpperCase(); return type === 'RIGID' || type === 'PCOM' || type.startsWith('FLAN') || type.startsWith('INST') || ['VALV', 'VALVE', 'VLV'].includes(type); }
 function unsafeDtxr(row) { const source = clean(row?.dtxrSource).toLowerCase(); const dtxr = clean(row?.dtxr).toUpperCase(); return /owner|support|ps-tag/.test(source) && /(PIPE REST|SUPPORT|GUIDE|STOP|SHOE|WEAR PLATE|TEE|ELBOW|BEND|REDUCER)/.test(dtxr); }
 function cleanRow(row) { if (!allowedType(row?.componentType)) return null; return unsafeDtxr(row) ? { ...row, dtxr: '', dtxrSource: 'weight-dtxr-suppressed' } : row; }
 async function stagedText(stagedJsonText) { const direct = clean(stagedJsonText); if (direct) return direct; const file = document?.querySelector?.('#model-converters-secondary-input')?.files?.[0]; return file ? await file.text().catch(() => '') : ''; }
@@ -173,7 +175,7 @@ function emptyRanking() { return { nodeHint: null, semanticSource: null, candida
 function rerankWithRating(row, config, { ratingMode = 'preview', snapshot = readXmlCiiPreviewRatingSnapshot() } = {}) {
   const authority = resolveXmlCiiWeightMatchRating(row, { mode: ratingMode, snapshot });
   const rating = authority.rating;
-  const ranking = rating
+  const ranking = rating && !row.sourceBoreHold
     ? rankXmlCiiWeightCandidates({ boreMm: row.boreMm, rating, lengthMm: row.lengthMm, nodeName: row.nodeName, componentType: row.componentType, componentRefNo: row.componentRefNo, dtxr: row.dtxr }, config, { includeRejected: true })
     : emptyRanking();
   const derivedValveHint = formatValveHint(ranking.nodeHint) || (() => {
@@ -193,6 +195,7 @@ function rerankWithRating(row, config, { ratingMode = 'preview', snapshot = read
     nodeHint: ranking.nodeHint,
     candidates: ranking.candidates.slice(0, 5),
     rejectedCandidates: ranking.rejectedCandidates.slice(0, 3),
+    comparisonReferences:comparisonWeightMasterReferences({...row,rating},config),
     ranking,
   };
 }
@@ -252,15 +255,40 @@ function applyNodeMeta(rows, xmlText) {
   });
 }
 
-function hintPanel(config) { ensureValveHintConfig(config); return `<div class="model-converters-workflow-detail-note" style="margin:8px 0;white-space:pre-line;">Rows included: RIGID, FLAN*, VALV / VALVE / VLV, INST. Rows excluded: support-only, TEE, ELBO/BEND, REDUCER, OLET, PIPE, GASK. Nodes with a non-empty ConnectionType (e.g. BRAN) are excluded. Valve Hint applies to all eligible nodes (Endpoint restriction removed). Exact candidate length gate is ±${esc(valveHintLengthToleranceMm(config))} mm.</div>`; }
+function hintPanel(config) { ensureValveHintConfig(config); return `<div class="model-converters-workflow-detail-note" style="margin:8px 0;white-space:pre-line;">Rows included: RIGID, FLAN*, VALV / VALVE / VLV, INST and Unknown (source PCOM). Rows excluded: support-only, TEE, ELBO/BEND, REDUCER, OLET, PIPE, GASK. Nodes with a non-empty ConnectionType (e.g. BRAN) are excluded. Valve Hint applies to all eligible nodes (Endpoint restriction removed). Exact candidate length gate is ±${esc(valveHintLengthToleranceMm(config))} mm.</div>`; }
 function patternText(patterns) { return esc((patterns || []).join('\n')); }
 function targetText(targets) { return esc((targets || []).map((target) => `${target.code || ''}|${target.label || ''}|${target.factor || 1}`).join('\n')); }
 function semanticRuleRowsHtml(config) { return semanticKeywordRows(config).map((rule) => `<tr data-wm-semantic-row><td><input type="checkbox" data-wm-rule-on ${rule.on ? 'checked' : ''}></td><td><input type="number" data-wm-rule-priority value="${attr(rule.priority)}" style="width:72px;"></td><td><input type="text" data-wm-rule-code value="${attr(rule.code)}" style="width:130px;"></td><td><input type="text" data-wm-rule-label value="${attr(rule.label)}" style="width:150px;"></td><td><textarea data-wm-rule-patterns spellcheck="false" style="min-width:320px;min-height:64px;">${patternText(rule.patterns)}</textarea></td></tr>`).join(''); }
 function factorRuleRowsHtml(config) { return specialValveFactorRows(config).map((rule) => `<tr data-wm-factor-row><td><input type="checkbox" data-wm-rule-on ${rule.on ? 'checked' : ''}></td><td><input type="number" data-wm-rule-priority value="${attr(rule.priority)}" style="width:72px;"></td><td><input type="text" data-wm-rule-code value="${attr(rule.code)}" style="width:150px;"></td><td><input type="text" data-wm-rule-label value="${attr(rule.label)}" style="width:170px;"></td><td><textarea data-wm-rule-patterns spellcheck="false" style="min-width:280px;min-height:64px;">${patternText(rule.patterns)}</textarea></td><td><textarea data-wm-rule-targets spellcheck="false" style="min-width:260px;min-height:64px;" title="One target per line: CODE|Label|Factor">${targetText(rule.targets)}</textarea></td></tr>`).join(''); }
 function editableRuleTable(title, headers, rowsHtml, helpText) { return `<section style="border:1px solid #253a55;border-radius:6px;overflow:hidden;background:#101a29;"><div style="padding:7px 9px;color:#9cc5ff;font-weight:700;font-size:12px;border-bottom:1px solid #253a55;">${esc(title)}</div><div style="overflow:auto;max-height:280px;"><table class="mc-rigid-review-table" style="border-collapse:collapse;font-size:12px;min-width:100%;"><thead><tr>${headers.map((header) => `<th style="white-space:nowrap;">${esc(header)}</th>`).join('')}</tr></thead><tbody>${rowsHtml}</tbody></table></div><div class="model-converters-workflow-detail-text" style="padding:6px 8px;">${esc(helpText)}</div></section>`; }
 function enhancedHintPanel(config) { ensureValveHintConfig(config); return `${hintPanel(config)}<details class="model-converters-workflow-master-card" style="margin:8px 0;"><summary style="cursor:pointer;color:#d7e6ff;font-weight:700;">Editable weight keyword / factor rules</summary><div style="display:flex;flex-direction:column;gap:10px;margin-top:10px;align-items:stretch;"><label style="display:flex;flex-direction:column;gap:4px;font-size:12px;color:#9cc5ff;">Length gate (mm)<input type="number" min="0" step="0.1" data-wm-weight-tolerance value="${attr(valveHintLengthToleranceMm(config))}" style="max-width:180px;background:#0b1320;color:#e6edf5;border:1px solid #31455f;border-radius:6px;padding:6px;"></label>${editableRuleTable('DTXR semantic keyword rules', ['On', 'Priority', 'Code', 'Label', 'Regex patterns'], semanticRuleRowsHtml(config), 'Use one regex per line. Higher priority rules use lower priority numbers.')}${editableRuleTable('Non-standard valve factor rules', ['On', 'Priority', 'Code', 'Label', 'Regex patterns', 'Targets'], factorRuleRowsHtml(config), 'Targets use CODE|Label|Factor, one per line. Candidate weight uses the maximum factored interpolated/extrapolated subset weight.')}</div><div class="model-converters-workflow-detail-text" style="margin-top:8px;">Factor targets use semantic codes such as CONTROL and BALL. Candidate weight uses the maximum factored interpolated/extrapolated subset weight and flags odd extrapolation ratios.</div></details>`; }
-function methodLabel(candidate) { if (candidate?.flangeWeightFallback) return 'Flange extrapolated'; if (candidate?.specialFactorRule) return candidate?.oddEntry ? 'Factor odd' : 'Factor'; if (candidate?.weightMethod === 'length-interpolated') return 'Interpolated'; if (candidate?.weightMethod === 'length-extrapolated' && candidate?.inferredWeight) return 'Extrapolated'; if (candidate?.zeroFallback) return 'No match'; return candidate?.preferred ? 'Suggested' : ''; }
-function renderAcceptedChip(candidate, rowIndex, issue) { const value = selectedWeight(candidate); const label = desc(candidate); const title = [`Rating: ${issue.rating || '-'}`, `TypeDesc: ${label}`, `Selected weight: ${value} kg`, `Length delta: ${nfmt(candidate.lengthDelta)} mm`, candidate?.weightWarning || ''].filter(Boolean).join(' | '); const marker = candidate?.inferredWeight ? '≈ ' : (candidate.preferred ? '★ ' : ''); const method = methodLabel(candidate); const suffix = method ? ` · ${method}` : ` · Δ${esc(nfmt(candidate.lengthDelta))}`; return `<button type="button" class="mc-rigid-review-candidate${candidate.preferred ? ' best' : ''}" data-wm-candidate="${rowIndex}" data-wm-weight="${attr(value)}" title="${attr(title)}" style="font-size:11px;line-height:1.1;padding:3px 6px;border-radius:999px;white-space:nowrap;max-width:330px;overflow:hidden;text-overflow:ellipsis;">${marker}${esc(value)}kg${suffix}</button>`; }
+function hasPositiveReviewCandidate(issue) {
+  // PCOM is deliberately a separate Unknown physical-length sidecar, not an
+  // approved catalog candidate. Keep it visible as reviewable evidence rather
+  // than falsely calling 14 legitimate PCOM estimates "unresolved".
+  const unknown=issue?.unknownComponentSuggestion;
+  if (unknown?.ok===true && Number(unknown.suggestedKg)>0) return true;
+  return (issue?.candidates || []).some(candidate => {
+    const weight=Number(candidate?.selectedWeight ?? candidate?.suggestedWeight ?? candidate?.weight);
+    return Number.isFinite(weight) && weight>0 && candidate?.zeroFallback !== true;
+  });
+}
+function methodLabel(candidate) { if (candidate?.flangeWeightFallback && candidate?.atFlangeToleranceBoundary) return 'Flange master +6mm'; if (candidate?.flangeWeightFallback) return 'Flange extrapolated'; if (candidate?.specialFactorRule) return candidate?.oddEntry ? 'Factor odd' : 'Factor'; if (candidate?.weightMethod === 'length-interpolated') return 'Interpolated'; if (candidate?.weightMethod === 'length-extrapolated' && candidate?.inferredWeight) return 'Extrapolated'; if (candidate?.zeroFallback) return 'No match'; return candidate?.preferred ? 'Suggested' : ''; }
+function renderAcceptedChip(candidate, rowIndex, issue) {
+  if (!isApprovedPhysicalMassCandidate(candidate, selectedWeight(candidate))) {
+    const amount = selectedWeight(candidate);
+    const label = desc(candidate);
+    const method = candidate?.preferred ? 'Exact-length master match' : (methodLabel(candidate) || 'Master candidate');
+    const evidence = [
+      'Advisory only, not approved physical-component mass',
+      'TypeDesc: ' + label,
+      'Rating: ' + (issue.rating || '-'),
+      'Weight: ' + amount + ' kg',
+      'Length delta: ' + nfmt(candidate.lengthDelta) + ' mm',
+      candidate?.weightWarning || '',
+    ].filter(Boolean).join(' | ');
+    return `<span data-advisory-weight="true" title="${attr(evidence)}" style="font-size:11px;padding:3px 6px;border:1px solid #a78bfa;border-radius:999px;">≈ ${esc(amount)}kg · ${esc(label)} · ${esc(method)} · advisory only</span>`;
+  } const value = selectedWeight(candidate); const label = desc(candidate); const title = [`Rating: ${issue.rating || '-'}`, `TypeDesc: ${label}`, `Selected weight: ${value} kg`, `Length delta: ${nfmt(candidate.lengthDelta)} mm`, candidate?.weightWarning || ''].filter(Boolean).join(' | '); const marker = candidate?.inferredWeight ? '≈ ' : (candidate.preferred ? '★ ' : ''); const method = methodLabel(candidate); const suffix = method ? ` · ${method}` : ` · Δ${esc(nfmt(candidate.lengthDelta))}`; return `<button type="button" class="mc-rigid-review-candidate${candidate.preferred ? ' best' : ''}" data-wm-candidate="${rowIndex}" data-wm-weight="${attr(value)}" title="${attr(title)}" style="font-size:11px;line-height:1.1;padding:3px 6px;border-radius:999px;white-space:nowrap;max-width:330px;overflow:hidden;text-overflow:ellipsis;">${marker}${esc(value)}kg${suffix}</button>`; }
 function renderRejectedChip(candidate) { return `<span class="mc-rigid-review-candidate mc-wm-chip-rejected" title="${attr(candidate.rejectedReason || '')}" style="font-size:11px;line-height:1.1;padding:3px 6px;border-radius:999px;white-space:nowrap;max-width:330px;overflow:hidden;text-overflow:ellipsis;opacity:.72;border-style:dashed!important;">× ${esc(desc(candidate))} · Δ${esc(nfmt(candidate.lengthDelta))}mm</span>`; }
 function enrichedOptionsForWeightMatch(config) { const split = truthy(config?.splitCondensedValveFlange) || truthy(config?.split_condensed_valve_flange); return { dryRun: true, skipAutoWeightMatch: true, supportConfigJson: JSON.stringify(config || {}), splitCondensedValveFlange: split, split_condensed_valve_flange: split, condenseRigidXsd: truthy(config?.condenseRigidXsd) || truthy(config?.condense_rigid_xsd) }; }
 function widthTh(label, widthPx) { return `<th style="min-width:${widthPx}px;width:${widthPx}px;resize:horizontal;overflow:auto;white-space:nowrap;">${esc(label)}</th>`; }
@@ -269,12 +297,58 @@ function parseTargetLines(value) { return lines(value).map((line) => { const par
 function parseRuleRows(panelEl, selector, withTargets) { return [...(panelEl?.querySelectorAll(selector) || [])].map((row, index) => ({ on: row.querySelector('[data-wm-rule-on]')?.checked !== false, priority: Number(row.querySelector('[data-wm-rule-priority]')?.value || ((index + 1) * 10)), code: clean(row.querySelector('[data-wm-rule-code]')?.value).toUpperCase(), label: clean(row.querySelector('[data-wm-rule-label]')?.value), patterns: lines(row.querySelector('[data-wm-rule-patterns]')?.value), ...(withTargets ? { targets: parseTargetLines(row.querySelector('[data-wm-rule-targets]')?.value) } : {}) })).filter((rule) => rule.code || rule.patterns.length); }
 function applyWeightRulePanelConfig(panelEl, config) { const cfg = plainObject(config) ? config : {}; cfg.weight = plainObject(cfg.weight) ? cfg.weight : {}; const tolerance = Number(panelEl?.querySelector('[data-wm-weight-tolerance]')?.value); if (Number.isFinite(tolerance) && tolerance >= 0) cfg.weight.valveHintLengthToleranceMm = tolerance; cfg.weight.semanticKeywordRules = parseRuleRows(panelEl, '[data-wm-semantic-row]', false); cfg.weight.specialValveFactorRules = parseRuleRows(panelEl, '[data-wm-factor-row]', true); ensureValveHintConfig(cfg); return cfg; }
 
-export function xmlCiiRenderWeightMatchPhase() {
-  const info = 'Default Rating authority is the exact Rating shown in Preview. Weight Match does not derive Rating again.';
-  return `<div class="model-converters-workflow-detail-title">5 Weight Match <span title="${attr(info)}" style="cursor:help;color:#8bb7ff;border:1px solid #406089;border-radius:50%;padding:0 5px;font-size:11px;">i</span></div><div class="model-converters-workflow-detail-text">Weight candidates use the Rating already shown in Preview. Use the DTXR button only when you explicitly want node DTXR Rating instead.</div><div id="mc-wm-hint-panel"></div><div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:10px 0;"><button type="button" class="model-converters-run-btn" id="mc-wm-refresh">Build Weight Data</button><button type="button" class="model-converters-download-btn" id="mc-wm-use-dtxr-rating">Use Rating as per DTXR</button><button type="button" class="model-converters-download-btn" id="mc-wm-fill-best">Use all ★ preferred</button><button type="button" class="model-converters-download-btn" id="mc-wm-length-toggle" title="Convert small master lengths (<100) from inch to mm. Default OFF.">⇄ in→mm: OFF</button><span id="mc-wm-status" class="mc-diag-run-status"></span></div><div id="mc-wm-content"><div class="model-converters-workflow-detail-note">Click <strong>Build Weight Data</strong> to compute matches using Preview Rating.</div></div>`;
+// Reuse the existing matching-rule editor in Phase 6 without instantiating
+// a second source-mass review table or a competing approval/persistence path.
+export function mountXmlCiiWeightRuleSettings(host, {config = {}, onSaveConfig} = {}) {
+  if (!host) return;
+  const current = () => ({
+    ...config,
+    weight: {...(config.weight || {})},
+  });
+  let effective=current();
+  host.innerHTML = `
+    <p class="model-converters-workflow-detail-text">
+      Matching settings are reference evidence only. They never approve physical mass.
+      Editing them requires rebuilding suggestions before a new review.
+    </p>
+    <label style="display:flex;gap:8px;align-items:center;font-size:12px;">
+      <input type="checkbox" data-phase6-small-length-convert
+        ${convOn(effective)?'checked':''}>
+      Convert small master lengths from inches to mm
+    </label>
+    <div data-phase6-weight-rule-editor>${enhancedHintPanel(effective)}</div>
+    <div data-phase6-rule-status role="status" style="font-size:12px;margin-top:8px;"></div>
+  `;
+  const editor=host.querySelector('[data-phase6-weight-rule-editor]');
+  const status=host.querySelector('[data-phase6-rule-status]');
+  const publish=()=> {
+    effective.weight.valveHintMapping=valveHintMappingRows(effective);
+    onSaveConfig?.(effective);
+    if(status) status.textContent='Matching settings saved. Reopen the consolidated review to refresh suggestions.';
+  };
+  editor?.addEventListener('change',()=>{
+    // Keep all fields (including the rule rows) in the same legacy parser.
+    effective=applyWeightRulePanelConfig(editor,effective);
+    publish();
+  });
+  host.querySelector('[data-phase6-small-length-convert]')?.addEventListener('change',event=>{
+    effective.weight={...(effective.weight||{}),
+      convertSmallLengthsInToMm:event.target.checked===true};
+    publish();
+  });
 }
 
-const WM_CACHE_KEY = 'xml-cii-wm-cache-v2-preview-rating';
+export function xmlCiiRenderWeightMatchPhase() {
+  const info = 'Default Rating authority is the exact Rating shown in Preview. Weight Match does not derive Rating again.';
+  return `<div class="model-converters-workflow-detail-title">5 Weight Match <span title="${attr(info)}" style="cursor:help;color:#8bb7ff;border:1px solid #406089;border-radius:50%;padding:0 5px;font-size:11px;">i</span></div><div class="model-converters-workflow-detail-text">Weight candidates use the Rating already shown in Preview. Use the DTXR button only when you explicitly want node DTXR Rating instead.</div><div id="mc-wm-hint-panel"></div><div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:10px 0;"><button type="button" class="model-converters-run-btn" id="mc-wm-refresh">Build Weight Data</button><button type="button" class="model-converters-download-btn" id="mc-wm-use-dtxr-rating">Use Rating as per DTXR</button><button type="button" class="model-converters-download-btn" id="mc-wm-fill-best">Prefill all suggestions (review)</button><button type="button" class="model-converters-download-btn" id="mc-wm-accept-drafts" style="background:#1e3a5f;border:1px solid #7298ca;color:#e9f4ff;">Accept verified suggestions</button><button type="button" class="model-converters-download-btn" id="mc-wm-length-toggle" title="Convert small master lengths (<100) from inch to mm. Default OFF.">⇄ in→mm: OFF</button><span id="mc-wm-status" class="mc-diag-run-status"></span></div><div id="mc-wm-batch-review" role="region" aria-label="Weight Match bulk confirmation" style="display:none;margin:8px 0;padding:12px;border:1px solid #7298ca;border-radius:8px;background:#11223a;color:#edf6ff;">
+  <strong>Independent physical-component mass confirmation</strong><div id="mc-wm-batch-summary" style="margin:8px 0;"></div>
+  <div id="mc-wm-batch-references" style="max-height:110px;overflow:auto;white-space:pre-wrap;font-size:11px;margin:8px 0;"></div>
+  <label style="display:flex;gap:8px;align-items:flex-start;"><input id="mc-wm-batch-attest" type="checkbox">I have independently verified every proposed physical-component mass to be accepted. Master suggestions alone do not establish actual mass.</label>
+  <div style="display:flex;gap:8px;margin-top:10px;"><button id="mc-wm-batch-confirm" type="button" disabled>Commit verified weights</button><button id="mc-wm-batch-cancel" type="button">Return to Weight Match</button></div>
+</div><div id="mc-wm-content"><div class="model-converters-workflow-detail-note">Click <strong>Build Weight Data</strong> to compute matches using Preview Rating.</div></div>`;
+}
+
+const WM_CACHE_KEY = 'xml-cii-wm-cache-v5-review-choice-preload-20261107';
 const PV_CACHE_KEY = 'xml-cii-pv-cache-v2';
 const CACHE_MAX_BYTES = 2_500_000;
 function wmCacheFingerprint(file, jsonLen, masterLen, overrides, ratingMode, snapshotRevision) { return `${file?.name || ''}:${file?.size || 0}|j${jsonLen}|m${masterLen}|o${JSON.stringify(overrides || {})}|rm${ratingMode}|pr${snapshotRevision || ''}`; }
@@ -305,29 +379,92 @@ export function bindXmlCiiWeightMatchPhase(detailEl, { xmlFile, stagedJsonText, 
     ratingModeButton.style.color = dtxr ? '#bbf7d0' : '';
   };
   const drawPanel = () => { if (panelEl) panelEl.innerHTML = enhancedHintPanel(activeConfig()); };
-  const saveInput = (input) => { const key = input.getAttribute('data-wm-key') || ''; const value = Number(input.value); if (!key || !Number.isFinite(value) || value <= 0) return; const cfg = activeConfig(); const overrides = ensureOverrides(cfg); overrides.rigidWeight = { ...(overrides.rigidWeight || {}), [key]: value }; onSaveConfig(cfg); };
+  const batchPanel=detailEl.querySelector('#mc-wm-batch-review');
+  const batchAttest=detailEl.querySelector('#mc-wm-batch-attest');
+  const batchConfirm=detailEl.querySelector('#mc-wm-batch-confirm');
+  const closeBatch=()=>{
+    if(batchPanel)batchPanel.style.display='none';
+    if(batchAttest)batchAttest.checked=false;
+    if(batchConfirm)batchConfirm.disabled=true;
+  };
+  const saveInput = (input) => {
+    const key=input.getAttribute('data-wm-key')||'';
+    const value=input.value===''?NaN:Number(input.value);
+    if(!key || !Number.isFinite(value) || value<=0) return false;
+    // Source manually entered weights may save on change. Ranked estimates
+    // need the SEPARATE batch confirmation; no per-row Reviewed/Save controls.
+    if(input.dataset.wmProposalDraft) return false;
+    const cfg=activeConfig();
+    const overrides=ensureOverrides(cfg);
+    overrides.rigidWeight={...(overrides.rigidWeight||{}),[key]:value};
+    onSaveConfig(cfg);
+    input.style.borderColor='#10b981';
+    return true;
+  };
+  const pendingDrafts=()=>[...contentEl.querySelectorAll('.mc-rigid-review-input[data-wm-proposal-draft]')]
+    .filter(input=>['estimate','approved'].includes(input.dataset.wmProposalDraft) &&
+      input.value!=='' && Number(input.value)>0);
+  const stageDraft=(input,choice)=>{
+    if(!input || !choice || !(Number(choice.weight)>0))return false;
+    input.value=String(choice.weight);
+    input.dataset.wmProposalDraft=choice.approved?'approved':'estimate';
+    input.dataset.wmProposalReference=weightReviewChoiceLabel(choice);
+    input.title=(choice.rejected?'LENGTH MISMATCH: ':'')+
+      'UNAPPROVED REVIEW DRAFT — '+weightReviewChoiceLabel(choice);
+    input.style.borderColor=choice.approved?'#10b981':'#d9a441';
+    closeBatch();
+    return true;
+  };
   const drawRows = (issues) => {
-    if (!issues.length) { contentEl.innerHTML = '<div class="model-converters-workflow-detail-note">No actual RIGID / FLAN* / VALVE / INST nodes with ElementLengthMm &gt; 6 mm were found.</div>'; return; }
+    if (!issues.length) { contentEl.innerHTML = '<div class="model-converters-workflow-detail-note">No actual RIGID / FLAN* / VALVE / INST / Unknown (PCOM) nodes with ElementLengthMm &gt; 6 mm were found.</div>'; return; }
     const rows = issues.map((issue, rowIndex) => {
       const best = issue.candidates?.[0];
-      const initial = issue.weight && issue.weight > 0 ? issue.weight : (best ? selectedWeight(best) : '');
+      const sourceMass=issue.weight && issue.weight>0 ? issue.weight :
+        (Number(issue.overrideWeight)>0 ? issue.overrideWeight : '');
+      const choices=availableWeightReviewChoices(issue);
+      const proposal=sourceMass===''?preferredWeightReviewDraft(issue):null;
+      const initial=sourceMass!==''?sourceMass:(proposal?.weight??'');
+      const isDraft=sourceMass==='' && !!proposal;
       const rowStyle = issue.mapped ? 'background:#0f2a1b;border-left:4px solid #2f9e63;' : (best?.zeroFallback ? 'background:#3a1010;border-left:4px solid #ef4444;' : (best?.inferredWeight ? 'background:#302607;border-left:4px solid #d9a441;' : 'background:#3a240f;border-left:4px solid #d08a22;'));
       const inputStyle = `width:86px;${best?.zeroFallback ? 'background:#3a1010;border:1px solid #ef4444;color:#ffd6d6;' : (best?.inferredWeight ? 'background:#352706;border:1px solid #d9a441;color:#fff1b8;' : '')}`;
-      const accepted = (issue.candidates || []).map((candidate) => renderAcceptedChip(candidate, rowIndex, issue)).join('');
-      const rejected = (issue.rejectedCandidates || []).map(renderRejectedChip).join('');
-      const chips = accepted || rejected || '<span class="model-converters-muted">No suggestion</span>';
-      const statusText = issue.mapped ? `Mapped (${issue.weightSource || 'weight'})` : (methodLabel(best) || 'Unresolved');
+      const accepted=choices.map((choice,index)=>
+        `<button type="button" data-wm-choice="${rowIndex}" data-wm-choice-index="${index}"
+         data-advisory-weight="${choice.approved?'false':'true'}"
+         title="${attr('Review only — '+weightReviewChoiceLabel(choice)+' | '+choice.reason)}"
+         style="font-size:11px;padding:3px 6px;cursor:pointer;line-height:1.3;border:1px solid ${choice.rejected?'#ef4444':'#a78bfa'};border-radius:5px;background:#1e293b;color:#e2e8f0;">
+          ${esc(weightReviewChoiceLabel(choice))}</button>`).join('');
+      const rejected='';
+      const unknown = issue.unknownComponentSuggestion;
+      const unknownText = unknown?.ok
+        ? `<span data-unknown-weight-suggestion="true" title="${attr('Advisory only · ' + unknown.referenceFamily + ' master ' + unknown.referenceLengthMm + 'mm / ' + unknown.referenceWeightKg + 'kg · threshold ' + unknown.thresholdMm + 'mm · no automatic XML/CII edit')}" style="font-size:11px;line-height:1.2;padding:4px 7px;border:1px solid #a78bfa;border-radius:999px;color:#ddd6fe;white-space:nowrap;">Length-rule ≈ ${esc(Number(unknown.suggestedKg).toFixed(3))} kg · ${esc(unknown.referenceFamily)}</span>`
+        : unknown ? `<span data-unknown-weight-hold="true" title="${attr(unknown.reason || unknown.code)}" style="font-size:11px;padding:4px 7px;border:1px solid #a78bfa;border-radius:999px;color:#ddd6fe;">Length-rule HOLD · ${esc(unknown.code)}</span>` : '';
+      const chips = [accepted, choices.length ? '' : unknownText, rejected].filter(Boolean).join('') || '<span class="model-converters-muted">No suggestion</span>';
+      const statusText = issue.mapped ? `Mapped (${issue.weightSource || 'weight'})` : (methodLabel(best) || (hasPositiveReviewCandidate(issue) ? 'Review candidate' : 'Unresolved'));
       const refEndpoint = issue.componentRefEndpoint || componentRefEndpoint(issue.componentRefNo, issue.endpoint);
       const nodeDisplay = issue.nodeNumberDisplay || issue.nodeNumber;
       const ratingInfo = ratingDisplayInfo(issue);
-      return `<tr style="${rowStyle}"><td>${esc(statusText)}</td><td title="${attr(issue.branchName)}">${esc(issue.branchName)}</td><td>${esc(issue.lineKey || '')}</td><td>${esc(issue.componentType || '')}</td><td>${esc(issue.boreMm == null ? '' : `${Number(issue.boreMm).toFixed(0)} mm`)}</td><td title="${attr(ratingInfo.title)}" style="${ratingInfo.style}">${esc(ratingInfo.shownRating || '')}</td><td title="${attr(issue.nodeNumber)}">${esc(nodeDisplay)}</td><td title="${attr(refEndpoint)}">${esc(refEndpoint)}</td><td title="${attr([issue.dtxrSource, issue.dtxrMatchedKey, issue.dtxrSourcePath, issue.dtxrSuppressionReason, ratingInfo.dtxrRating ? `DTXR Rating ${ratingInfo.dtxrRating}#` : ''].filter(Boolean).join(' · '))}">${esc(issue.dtxr || 'Not found')}</td><td>${esc(issue.valveHint || '')}</td><td title="${attr(issue.elementLengthSource || '')}">${esc(issue.lengthMm == null ? '' : `${Number(issue.lengthMm).toFixed(1)} mm`)}</td><td><input type="number" min="0" step="0.001" class="mc-rigid-review-input" data-wm-key="${attr(issue.key)}" value="${attr(initial)}" placeholder="kg" style="${inputStyle}"></td><td style="max-width:540px;"><div style="display:flex;flex-wrap:wrap;gap:4px;max-height:72px;overflow:auto;align-items:flex-start;">${chips}</div></td></tr>`;
+      return `<tr style="${rowStyle}"><td>${esc(statusText)}</td><td title="${attr(issue.branchName)}">${esc(issue.branchName)}</td><td>${esc(issue.lineKey || '')}</td><td>${esc((issue.reviewCategory === 'UNKNOWN' || issue.componentType === 'PCOM') ? 'Unknown (PCOM)' : issue.componentType || '')}</td><td title="${attr([issue.sourceBoreAuthority || 'source bore not reconciled', issue.sourceOutsideDiameterMm ? `Source OD ${issue.sourceOutsideDiameterMm} mm` : '', issue.boreAuthorityMismatch ? `Preview/enriched DN ${issue.projectedBoreMm} differs; using source DN` : '', issue.sourceBoreHold ? 'HOLD: source physical identity ambiguous' : ''].filter(Boolean).join(' | '))}">${esc(issue.boreMm == null ? '' : `${Number(issue.boreMm).toFixed(0)} mm`)}${issue.boreAuthorityMismatch ? ' *' : ''}</td><td title="${attr(ratingInfo.title)}" style="${ratingInfo.style}">${esc(ratingInfo.shownRating || '')}</td><td title="${attr(issue.nodeNumber)}">${esc(nodeDisplay)}</td><td title="${attr(refEndpoint)}">${esc(refEndpoint)}</td><td title="${attr([issue.dtxrSource, issue.dtxrMatchedKey, issue.dtxrSourcePath, issue.dtxrSuppressionReason, ratingInfo.dtxrRating ? `DTXR Rating ${ratingInfo.dtxrRating}#` : ''].filter(Boolean).join(' · '))}">${esc(issue.dtxr || 'Not found')}</td><td>${esc(issue.valveHint || '')}</td><td title="${attr(issue.elementLengthSource || '')}">${esc(issue.lengthMm == null ? '' : `${Number(issue.lengthMm).toFixed(1)} mm`)}</td><td><input type="number" min="0" step="0.001" class="mc-rigid-review-input" data-wm-key="${attr(issue.key)}" data-wm-proposal-draft="${isDraft?(proposal.approved?'approved':'estimate'):''}" data-wm-proposal-reference="${attr(proposal?weightReviewChoiceLabel(proposal):'')}" value="${attr(initial)}" placeholder="kg" title="${attr(isDraft?'Review draft only; no mass written to source configuration':'Manual physical-component weight')}" style="${inputStyle};${isDraft?'border:1px solid #d9a441;':''}">
+        </td><td style="max-width:540px;"><div style="display:flex;flex-wrap:wrap;gap:4px;max-height:72px;overflow:auto;align-items:flex-start;">${chips}</div></td></tr>`;
     }).join('');
     const cfg = activeConfig();
     const authorityText = ratingMode === 'dtxr' ? 'Explicit DTXR Rating mode' : 'Exact Rating shown in Preview';
     contentEl.innerHTML = `<div class="model-converters-workflow-detail-note" style="margin-bottom:8px;">Rating authority: <strong>${esc(authorityText)}</strong>. Weight Match does not derive Rating again. Exact candidate length gate is ±${nfmt(valveHintLengthToleranceMm(cfg))} mm. Length conversion is ${convOn(cfg) ? 'ON' : 'OFF'}.</div><div class="mc-rigid-review-table-wrap" style="overflow:auto;max-height:48vh;"><table class="mc-rigid-review-table" style="border-collapse:collapse;font-size:12px;table-layout:auto;"><thead><tr>${[['Status', 140], ['Branch', 280], ['Line Key', 110], ['ComponentType', 130], ['Bore', 90], ['Rating', 90], ['Node', 90], ['ComponentRefNo_Endpoint', 190], ['DTXR', 260], ['Valve Hint', 160], ['Length', 100], ['Weight (kg)', 110], ['Nearest Suggestions', 360]].map(([label, width]) => widthTh(label, width)).join('')}</tr></thead><tbody>${rows}</tbody></table></div>`;
-    contentEl.querySelectorAll('[data-wm-candidate]').forEach((button) => button.addEventListener('click', () => { const input = contentEl.querySelectorAll('.mc-rigid-review-input')[Number(button.dataset.wmCandidate)]; if (!input) return; input.value = button.dataset.wmWeight || ''; input.dispatchEvent(new Event('change', { bubbles: true })); }));
+    contentEl.querySelectorAll('[data-wm-choice]').forEach(button=>button.addEventListener('click',()=>{
+      const rowIndex=Number(button.dataset.wmChoice);
+      const choice=availableWeightReviewChoices(localIssues[rowIndex])[Number(button.dataset.wmChoiceIndex)];
+      const input=contentEl.querySelectorAll('.mc-rigid-review-input')[rowIndex];
+      if(stageDraft(input,choice))status('Staged '+weightReviewChoiceLabel(choice)+'. Accept verified suggestions to commit.', 'ok');
+    }));
+
   };
-  const fillBest = () => { let count = 0; contentEl.querySelectorAll('.mc-rigid-review-input').forEach((input, index) => { const best = localIssues[index]?.candidates?.[0]; if (!best || Number(selectedWeight(best)) <= 0 || best.zeroFallback) return; input.value = String(selectedWeight(best)); saveInput(input); count += 1; }); return count; };
+  const fillBest = () => {
+    let count=0;
+    contentEl.querySelectorAll('.mc-rigid-review-input').forEach((input,index)=>{
+      if(input.value!=='' && !input.dataset.wmProposalDraft)return; // preserve manual values
+      if(stageDraft(input,preferredWeightReviewDraft(localIssues[index])))count++;
+    });
+    return count;
+  };
   const compute = async (opts = {}) => {
     let liveConfig = activeConfig();
     syncToggle(); syncRatingMode(); drawPanel();
@@ -345,7 +482,7 @@ export function bindXmlCiiWeightMatchPhase(detailEl, { xmlFile, stagedJsonText, 
         localIssues = cached.data.map((row) => applyXmlCiiFlangeWeightFallbackToIssue(rerankWithRating(row, liveConfig, { ratingMode, snapshot }), liveConfig));
         const mapped = localIssues.filter((row) => row.mapped).length;
         const zero = localIssues.filter((row) => row.candidates?.[0]?.zeroFallback).length;
-        const unresolved = localIssues.length - mapped - localIssues.filter((row) => row.candidates?.[0]?.preferred || row.candidates?.[0]?.flangeWeightFallback || (row.candidates?.[0]?.inferredWeight && !row.candidates?.[0]?.zeroFallback)).length - zero;
+        const unresolved = localIssues.filter(row => !row.mapped && !hasPositiveReviewCandidate(row)).length;
         status(`${mapped} mapped · restored · ${ratingMode === 'dtxr' ? 'DTXR Rating' : 'Preview Rating'} · ${localIssues.length} shown`, (zero || unresolved) ? 'bad' : 'ok');
         drawRows(localIssues);
         if (window.__xmlCiiPendingValidation) { window.__xmlCiiPendingValidation = false; detailEl?.dispatchEvent(new CustomEvent('xml-cii-weight-validator-ready', { bubbles: true, cancelable: true, detail: { issues: localIssues, masterRows: liveConfig.weight?.masterRows || [], config: liveConfig } })); }
@@ -362,15 +499,18 @@ export function bindXmlCiiWeightMatchPhase(detailEl, { xmlFile, stagedJsonText, 
       const cfg = await ensureWeightMasterRows(mergeRuntimeOverrides(mergeRuntimeOverrides(enrichedConfig, liveConfig), getXmlCiiPreviewRuntimeConfig()));
       if (!hasWeightMasterRows(cfg)) { localIssues = []; renderWeightMasterBlocked(contentEl); status('Weight master not ready', 'bad'); return; }
       const geometryXml = applyXmlCiiStagedGeometryAuthority(enriched.xmlText || xmlText, jsonText, { config: cfg }).xmlText;
-      localIssues = applyNodeMeta(collectXmlCiiWeightMatchRows(geometryXml, jsonText, cfg), geometryXml).map(cleanRow).filter(Boolean).map((row) => applyXmlCiiFlangeWeightFallbackToIssue(rerankWithRating(row, cfg, { ratingMode, snapshot }), cfg));
+      localIssues = reconcileXmlCiiWeightMatchSourceBores(applyNodeMeta(collectXmlCiiWeightMatchRows(geometryXml, jsonText, cfg), geometryXml), xmlText).map(cleanRow).filter(Boolean).map((row) => applyXmlCiiFlangeWeightFallbackToIssue(rerankWithRating(row, cfg, { ratingMode, snapshot }), cfg));
       const mapped = localIssues.filter((row) => row.mapped).length;
       const suggested = localIssues.filter((row) => row.candidates?.[0]?.preferred).length;
       const flange = localIssues.filter((row) => row.candidates?.[0]?.flangeWeightFallback).length;
       const inferred = localIssues.filter((row) => row.candidates?.[0]?.inferredWeight && !row.candidates?.[0]?.zeroFallback && !row.candidates?.[0]?.flangeWeightFallback).length;
       const zero = localIssues.filter((row) => row.candidates?.[0]?.zeroFallback).length;
-      const unresolved = localIssues.length - mapped - suggested - flange - inferred - zero;
+      const advisory = localIssues.filter(row => !row.mapped && hasPositiveReviewCandidate(row) && !row.candidates?.[0]?.preferred).length;
+      const unresolved = localIssues.filter(row => !row.mapped && !hasPositiveReviewCandidate(row)).length;
       const missingRatings = localIssues.filter((row) => !row.rating).length;
-      status(`${mapped} mapped · ${suggested} exact · ${flange} flange fallback · ${inferred} inferred · ${missingRatings} missing Rating · ${unresolved} unresolved · ${localIssues.length} shown${stagedSource?.label ? ` · ${stagedSource.label}` : ''}`, (zero || unresolved || missingRatings) ? 'bad' : 'ok');
+      const sourceBoreConflicts = localIssues.filter(row => row.boreAuthorityMismatch).length;
+      const sourceBoreHolds = localIssues.filter(row => row.sourceBoreHold).length;
+      status(`${mapped} mapped · ${suggested} exact · ${flange} flange fallback · ${inferred} inferred · ${missingRatings} missing Rating · ${sourceBoreConflicts} corrected Preview DN · ${sourceBoreHolds} source DN HOLD · ${advisory} review candidates · ${unresolved} unresolved · ${localIssues.length} shown${stagedSource?.label ? ` · ${stagedSource.label}` : ''}`, (zero || unresolved || missingRatings) ? 'bad' : 'ok');
       drawRows(localIssues);
       const cacheable = localIssues.map((row) => { const { ranking, ...rest } = row; return rest; });
       const fingerprint = wmCacheFingerprint(file, jsonText.length, cfg?.weight?.masterRows?.length || 0, cfg?.overrides, ratingMode, snapshot.revision);
@@ -385,9 +525,65 @@ export function bindXmlCiiWeightMatchPhase(detailEl, { xmlFile, stagedJsonText, 
   detailEl.querySelector('#mc-wm-refresh')?.addEventListener('click', () => compute({ force: true }));
   ratingModeButton?.addEventListener('click', () => { ratingMode = ratingMode === 'preview' ? 'dtxr' : 'preview'; invalidateXmlCiiWeightCache(); syncRatingMode(); compute({ force: true }); });
   toggleEl?.addEventListener('click', () => { invalidateXmlCiiWeightCache(); const cfg = activeConfig(); cfg.weight = plainObject(cfg.weight) ? cfg.weight : {}; cfg.weight.convertSmallLengthsInToMm = cfg.weight.convertSmallLengthsInToMm !== true; onSaveConfig(cfg); contentEl.innerHTML = '<div class="model-converters-workflow-detail-note">Length conversion changed. Click <strong>Build Weight Data</strong> to recompute.</div>'; localIssues = []; syncToggle(); });
-  detailEl.querySelector('#mc-wm-fill-best')?.addEventListener('click', () => { const count = fillBest(); status(`Applied ${count} preferred weight(s)`, count ? 'ok' : 'bad'); });
+  detailEl.querySelector('#mc-wm-fill-best')?.addEventListener('click', () => {
+    const count=fillBest();
+    status('Prefilled '+count+' review draft(s). Nothing saved. Use Accept verified suggestions after independent verification.',count?'ok':'bad');
+  });
+  detailEl.querySelector('#mc-wm-accept-drafts')?.addEventListener('click',()=>{
+    const pending=pendingDrafts();
+    if(!pending.length){status('No uncommitted estimated weights to confirm.', 'bad');closeBatch();return;}
+    detailEl.querySelector('#mc-wm-batch-summary').textContent=
+      pending.length+' positive estimate(s) staged. Verify each physical source before confirming; none is approved by its catalog match.';
+    detailEl.querySelector('#mc-wm-batch-references').textContent=pending.slice(0,15).map((input,i)=>
+      (i+1)+'. '+(input.dataset.wmKey||'source ref missing')+' | '+
+      input.value+' kg | '+(input.dataset.wmProposalReference||'empirical source')
+    ).join('\n')+(pending.length>15?'\n… '+(pending.length-15)+' further rows; inspect Weight Match before confirming.':'');
+    if(batchPanel)batchPanel.style.display='block';
+    if(batchAttest)batchAttest.checked=false;
+    if(batchConfirm)batchConfirm.disabled=true;
+  });
+  batchAttest?.addEventListener('change',()=>{
+    if(batchConfirm)batchConfirm.disabled=!batchAttest.checked||pendingDrafts().length===0;
+  });
+  detailEl.querySelector('#mc-wm-batch-cancel')?.addEventListener('click',closeBatch);
+  batchConfirm?.addEventListener('click',()=>{
+    if(!batchAttest?.checked)return;
+    const pending=pendingDrafts();
+    if(!pending.length){closeBatch();return;}
+    const cfg=activeConfig();
+    const overrides=ensureOverrides(cfg);
+    const weights={...(overrides.rigidWeight||{})};
+    const receipts={...(overrides.rigidWeightReviewReceipts||{})};
+    for(const input of pending){
+      const key=input.dataset.wmKey||'';
+      const weight=Number(input.value);
+      if(!key||!Number.isFinite(weight)||weight<=0)continue;
+      weights[key]=weight;
+      receipts[key]={reviewed:true,reviewMethod:'EXPLICIT_BULK_OWNER_ATTESTATION',
+        weightKg:weight,sourceComponentRef:key,
+        statement:'Reviewer confirms independent physical-component mass verification'};
+    }
+    overrides.rigidWeight=weights;
+    overrides.rigidWeightReviewReceipts=receipts;
+    onSaveConfig(cfg);
+    for(const input of pending){
+      delete input.dataset.wmProposalDraft;
+      delete input.dataset.wmProposalReference;
+      input.style.borderColor='#10b981';
+      input.title='Explicitly accepted source physical-component mass.';
+    }
+    closeBatch();
+    status('Accepted '+pending.length+' independently verified physical masses. No per-row qualification controls.', 'ok');
+  });
   panelEl?.addEventListener('change', () => { try { const cfg = applyWeightRulePanelConfig(panelEl, activeConfig()); cfg.weight.valveHintMapping = valveHintMappingRows(cfg); onSaveConfig(cfg); invalidateXmlCiiWeightCache(); contentEl.innerHTML = '<div class="model-converters-workflow-detail-note">Weight keyword/factor rules changed. Click <strong>Build Weight Data</strong> to recompute.</div>'; localIssues = []; status('Weight rules saved'); } catch (error) { status(error?.message || String(error), 'bad'); } });
-  contentEl.addEventListener('change', (event) => { const input = event.target.closest?.('.mc-rigid-review-input'); if (input) saveInput(input); });
+  contentEl.addEventListener('input',event=>{
+    const input=event.target.closest?.('.mc-rigid-review-input');
+    if(input){delete input.dataset.wmProposalDraft;delete input.dataset.wmProposalReference;closeBatch();}
+  });
+  contentEl.addEventListener('change',event=>{
+    const input=event.target.closest?.('.mc-rigid-review-input');
+    if(input && !input.dataset.wmProposalDraft)saveInput(input); // explicit manual entry only
+  });
   syncToggle(); syncRatingMode(); drawPanel();
   if (typeof window !== 'undefined' && window.__xmlCiiPendingValidation) compute();
   else status('Ready to build with Preview Rating');
@@ -408,7 +604,7 @@ export async function computeXmlCiiWeightIssues({ xmlFile, resolveStagedJsonText
     if (!hasWeightMasterRows(cfg)) return null;
     const geometryXml = applyXmlCiiStagedGeometryAuthority(enriched.xmlText || xmlText, jsonText, { config: cfg }).xmlText;
     const snapshot = readXmlCiiPreviewRatingSnapshot();
-    const issues = applyNodeMeta(collectXmlCiiWeightMatchRows(geometryXml, jsonText, cfg), geometryXml).map(cleanRow).filter(Boolean).map((row) => applyXmlCiiFlangeWeightFallbackToIssue(rerankWithRating(row, cfg, { ratingMode: 'preview', snapshot }), cfg));
+    const issues = reconcileXmlCiiWeightMatchSourceBores(applyNodeMeta(collectXmlCiiWeightMatchRows(geometryXml, jsonText, cfg), geometryXml), xmlText).map(cleanRow).filter(Boolean).map((row) => applyXmlCiiFlangeWeightFallbackToIssue(rerankWithRating(row, cfg, { ratingMode: 'preview', snapshot }), cfg));
     return { issues, masterRows: cfg.weight?.masterRows || [], config: cfg, previewRatingSnapshot: snapshot };
   } catch (error) {
     console.warn('XML→CII standalone weight computation failed:', error);

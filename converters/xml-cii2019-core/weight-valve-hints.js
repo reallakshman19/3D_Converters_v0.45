@@ -90,6 +90,84 @@ function scoreSemanticSource(source, candidate, config) { if (!source?.matches?.
 export function classifyWeightMasterCandidate(candidate) { const value = typeof candidate === 'string' ? candidate : `${candidate?.type || ''} ${candidate?.typeDesc || ''}`; const normalized = normalizeWeightText(value); if (/\b(SPECTACLE|SPADE|SPACER|BLIND)\b/.test(normalized)) return { family: 'BLIND', subtype: 'BLIND' }; if (/\b(CHECK|SWING|NRV|NON-RETURN|NONRETURN)\b/.test(normalized)) return { family: 'VALVE', subtype: 'CHECK' }; if (/\bGATE\b/.test(normalized)) return { family: 'VALVE', subtype: 'GATE' }; if (/\bBALL\b/.test(normalized)) return { family: 'VALVE', subtype: 'BALL' }; if (/\bGLOBE\b/.test(normalized)) return { family: 'VALVE', subtype: 'GLOBE' }; if (/\bCONTROL\b/.test(normalized)) return { family: 'VALVE', subtype: 'CONTROL' }; if (/\bBUTTERFLY\b/.test(normalized)) return { family: 'VALVE', subtype: 'BUTTERFLY' }; if (/\b(VALVE|VLV)\b/.test(normalized)) return { family: 'VALVE', subtype: 'VALVE_GENERIC' }; if (/\b(FLANGE|FLANGED|WELDNECK|WELDING-NECK|WNFL)\b/.test(normalized)) return { family: 'FLANGE', subtype: 'FLANGE' }; return { family: '', subtype: '' }; }
 export function scoreValveHintAgainstCandidate(nodeHint, candidateClass, candidate) { if (!nodeHint) return { tier: 0, reason: '' }; const masterText = `${candidate?.type || ''} ${candidate?.typeDesc || ''}`; const regex = safeRegex(nodeHint.masterRegex); if (regex && regex.test(masterText)) return { tier: 120, reason: `${nodeHint.code} exact` }; if (nodeHint.family === 'VALVE' && candidateClass.family === 'VALVE' && nodeHint.subtype && nodeHint.subtype === candidateClass.subtype) return { tier: 110, reason: `${nodeHint.code} exact` }; if (nodeHint.family === 'VALVE' && candidateClass.family === 'VALVE' && candidateClass.subtype && candidateClass.subtype !== 'VALVE_GENERIC') return { tier: 70, reason: `${nodeHint.code} valve, wrong subtype` }; if (nodeHint.family === 'VALVE' && candidateClass.family === 'VALVE') return { tier: 50, reason: `${nodeHint.code} generic valve` }; if (nodeHint.family === 'VALVE' && ['FLANGE', 'BLIND'].includes(candidateClass.family)) return { tier: -80, reason: `${nodeHint.code} non-valve demoted` }; return { tier: 0, reason: `${nodeHint.code} no semantic match` }; }
 function roundWeight(value) { const numeric = Number(value); return Number.isFinite(numeric) ? Math.round(numeric * 1000) / 1000 : 0; }
+/**
+ * Physical-family constraint for a component with source DTXR identity.
+ * Presentation/ranking only: this never approves engineering source mass.
+ * An unresolved component family gets no family-foreign length extrapolation.
+ */
+export function classifySourceWeightFamily(context = {}) {
+  const type = text(context.componentType).trim().toUpperCase();
+  const dtxr = text(context.dtxr).trim().toUpperCase();
+  const nodeName = text(context.nodeName).trim().toUpperCase();
+  const src = dtxr || nodeName;
+  if (type === 'PCOM' || type === 'UNKNOWN' || context.reviewCategory === 'UNKNOWN')
+    return { family: 'UNKNOWN', subtype: '', trim: '', evidence: 'PCOM / Unknown' };
+  const has = re => re.test(src);
+  const trim = has(/\b(FULL[\s-]*BORE|FULL[\s-]*PORT|FB)\b/) ? 'FULL_BORE'
+    : has(/\b(REDUCED[\s-]*BORE|REDUCED[\s-]*PORT|RB)\b/) ? 'REDUCED_BORE' : '';
+  if (has(/\bBRANCH[\s-]*FITTING\b/))
+    return { family: 'BRANCH_FITTING', subtype: '', trim: '', evidence: src };
+  if (has(/\b(SPECTACLE|SPADE|SPACER)\b/))
+    return { family: 'BLIND', subtype: 'SPECTACLE', trim: '', evidence: src };
+  if (has(/\bBLIND[\s-]*FLANGE\b/))
+    return { family: 'BLIND', subtype: 'BLIND_FLANGE', trim: '', evidence: src };
+  if (has(/\b(WELDING[\s-]*NECK|WELDNECK|WNFL)\b/))
+    return { family: 'FLANGE', subtype: 'WELDNECK', trim: '', evidence: src };
+  const isValveType = type.startsWith('VALV') || type === 'VLV'
+    || has(/\b(VALVE|VLV|BALL|GATE|CHECK|GLOBE|BUTTERFLY|CONTROL|SWING)\b/);
+  if (isValveType) {
+    const subtype = has(/\bBALL\b/) ? 'BALL'
+      : has(/\b(CHECK|SWING|NRV|NON[\s-]*RETURN)\b/) ? 'CHECK'
+      : has(/\bGATE\b/) ? 'GATE'
+      : has(/\bGLOBE\b/) ? 'GLOBE'
+      : has(/\bCONTROL\b/) ? 'CONTROL'
+      : has(/\bBUTTERFLY\b/) ? 'BUTTERFLY' : '';
+    return { family: 'VALVE', subtype, trim, evidence: src };
+  }
+  if (has(/\bFLANGE\b/) || type.startsWith('FLAN'))
+    return { family: 'FLANGE', subtype: '', trim: '', evidence: src };
+  return { family: type.startsWith('INST') ? 'INSTRUMENT' : 'UNRESOLVED',
+    subtype: '', trim: '', evidence: src || type };
+}
+
+export function isWeightMasterPhysicalFamilyMatch(candidate, constraint) {
+  const family = constraint?.family || '';
+  // Compatibility for standalone generic master-ranking callers without
+  // a physical source type. Source-aware Weight Match always has one.
+  if (!family) return true;
+  if (family === 'UNKNOWN' || family === 'UNRESOLVED' ||
+      family === 'INSTRUMENT') return false;
+  // This guard receives RAW 1595-row Excel/JSON master records, not just
+  // baseCandidateFromRow's normalized {typeDesc,type}. Normalize BOTH forms.
+  const type = text(candidate?.type ?? candidate?.Type ?? candidate?._raw?.Type);
+  const desc = text(candidate?.typeDesc ?? candidate?.TypeDesc ??
+    candidate?.valveType ?? candidate?.['Valve Type'] ??
+    candidate?._raw?.TypeDesc ?? candidate?.type).toUpperCase();
+  const classified = classifyWeightMasterCandidate({type,typeDesc:desc});
+  if (family === 'BRANCH_FITTING')
+    return /\bBRANCH[\s-]*FITTING\b/.test(desc);
+  if (family === 'FLANGE') {
+    if (classified.family !== 'FLANGE') return false;
+    if (constraint.subtype === 'WELDNECK')
+      return /\b(WELDNECK|WELDING[\s-]*NECK|WNFL)\b/.test(desc);
+    return true;
+  }
+  if (family === 'BLIND') {
+    if (classified.family !== 'BLIND') return false;
+    return constraint.subtype === 'SPECTACLE'
+      ? /\b(SPECTACLE|SPADE|SPACER)\b/.test(desc)
+      : constraint.subtype === 'BLIND_FLANGE'
+        ? /\bBLIND[\s-]*FLANGE\b/.test(desc) : true;
+  }
+  if (family !== 'VALVE' || classified.family !== 'VALVE') return false;
+  if (constraint.subtype && classified.subtype !== constraint.subtype) return false;
+  if (constraint.trim === 'FULL_BORE')
+    return /\b(FULL[\s-]*BORE|FULL[\s-]*PORT|FB)\b/.test(desc);
+  if (constraint.trim === 'REDUCED_BORE')
+    return /\b(REDUCED[\s-]*BORE|REDUCED[\s-]*PORT|RB)\b/.test(desc);
+  return true;
+}
+
 function resolveCandidateWeight(candidate, xmlLengthMm, config) { const masterWeight = Number(candidate.weight); const masterLength = Number(candidate.rowLength); const xmlLength = Number(xmlLengthMm); if (config?.weight?.useWeightExtrapolation === false || !Number.isFinite(masterWeight) || !Number.isFinite(masterLength) || !Number.isFinite(xmlLength) || masterLength <= 0) return { masterWeight, selectedWeight: masterWeight, suggestedWeight: masterWeight, weightMethod: 'master', extrapolationRatio: 1, weightWarning: '' }; const ratio = xmlLength / masterLength; const minRatio = numberOr(config?.weight?.extrapolationMinRatio, 0.65); const maxRatio = numberOr(config?.weight?.extrapolationMaxRatio, 1.6); if (ratio < minRatio || ratio > maxRatio) return { masterWeight, selectedWeight: masterWeight, suggestedWeight: masterWeight, weightMethod: 'master', extrapolationRatio: ratio, weightWarning: `extrapolation ratio ${ratio.toFixed(2)} outside ${minRatio}-${maxRatio}` }; if (Math.abs(ratio - 1) <= 1e-9) return { masterWeight, selectedWeight: masterWeight, suggestedWeight: masterWeight, weightMethod: 'master', extrapolationRatio: 1, weightWarning: '' }; const selectedWeight = roundWeight(masterWeight * ratio); return { masterWeight, selectedWeight, suggestedWeight: selectedWeight, weightMethod: 'length-extrapolated', extrapolationRatio: ratio, weightWarning: '' }; }
 function baseCandidateFromRow(row, config, lengthMm) { const rowBore = pickNumber(row, ['boreMm', 'convertedBore', 'Converted Bore', 'bore', 'Bore', 'BORE', 'DN', 'NB', 'NPS']); const rawLength = pickNumber(row, ['lengthMm', 'length', 'Length', 'LENGTH', 'Length mm', 'LENGTH_MM', 'Length (RF-F/F)', 'RF-F/F', 'LEN', 'faceToFace', 'Face To Face', 'F2F']); const rowLength = masterLength(rawLength, Number(lengthMm), config); const weight = pickNumber(row, ['valveWeight', 'directWeight', 'weight', 'Weight', 'WEIGHT', 'Weight kg', 'WEIGHT_KG', 'RF/RTJ KG', 'Valve Weight']); const rowRating = normalizedRating(pickText(row, ['ratingClass', 'rating', 'Rating', 'RATING', 'Class', 'CLASS', 'Pressure Class'])); const type = pickText(row, ['type', 'Type', 'TYPE', 'valveType', 'Valve Type']); const typeDesc = pickText(row, ['typeDesc', 'TypeDesc', 'Type Desc', 'Type Description', 'Description', 'Valve Type']); if (rowBore === null || rowLength === null || weight === null || !rowRating) return null; return { weight, rowBore, rowLength, rowRating, type, valveType: type, typeDesc, rowData: row }; }
 function interpolateBetween(a, b, targetLength) { const lenA = Number(a.rowLength), lenB = Number(b.rowLength), wtA = Number(a.weight), wtB = Number(b.weight); if (!Number.isFinite(lenA) || !Number.isFinite(lenB) || !Number.isFinite(wtA) || !Number.isFinite(wtB) || Math.abs(lenB - lenA) <= 1e-9) return null; return wtA + ((Number(targetLength) - lenA) * (wtB - wtA)) / (lenB - lenA); }
