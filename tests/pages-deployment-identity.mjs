@@ -9,7 +9,7 @@ export function verifyDeploymentIdentity(identity, expectedSha) {
     'PAGES_EXPECTED_SHA must be a full, lowercase, 40-character commit SHA');
   assert.equal(identity?.schema, DEPLOYMENT_SCHEMA,
     'Published deployment manifest is absent or has the wrong schema');
-  assert.equal(identity?.repository, 'reallakshman19/3D_Converters_v0.35');
+  assert.equal(identity?.repository, 'reallakshman19/3D_Converters_v0.45');
   assert.ok(typeof identity?.commitSha==='string' && SHA.test(identity.commitSha),
     'Published deployment SHA is missing or malformed');
   assert.ok(typeof identity?.workflowRunId==='string' &&

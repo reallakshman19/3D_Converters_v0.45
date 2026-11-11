@@ -5,7 +5,7 @@ import {verifyDeploymentIdentity,DEPLOYMENT_SCHEMA}
 
 const sha='a'.repeat(40);
 const proof={schema:DEPLOYMENT_SCHEMA,
-  repository:'reallakshman19/3D_Converters_v0.35',
+  repository:'reallakshman19/3D_Converters_v0.45',
   commitSha:sha,workflowRunId:'42847303668'};
 
 test('Pages release identity accepts only exact published SHA',()=>{

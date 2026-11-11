@@ -18,7 +18,7 @@ def stamp(site: Path, commit: str, run_id: str, repository: str, *, main_only=Fa
         raise ValueError("Release SHA must be full lowercase Git commit SHA")
     if not re.fullmatch(r"[1-9][0-9]*", run_id):
         raise ValueError("Release run ID must be a positive decimal integer")
-    if repository != "reallakshman19/3D_Converters_v0.35":
+    if repository != "reallakshman19/3D_Converters_v0.45":
         raise ValueError("Unexpected release repository")
     if main_only and os.environ.get("GITHUB_REF") != "refs/heads/main":
         raise ValueError("Production Pages publishing must run from main")

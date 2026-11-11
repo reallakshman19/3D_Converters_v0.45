@@ -101,7 +101,7 @@ jobs:
           import json, os, time, urllib.request
           sha = os.environ["EXPECTED_SHA"]
           run_id = os.environ["GITHUB_RUN_ID"]
-          url = ("https://reallakshman19.github.io/3D_Converters_v0.35/"
+          url = ("https://reallakshman19.github.io/3D_Converters_v0.45/"
                  "release-identity.json?run=" + run_id)
           for attempt in range(24):
               try:

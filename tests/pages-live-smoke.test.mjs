@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { chromium } from 'playwright';
 import {verifyDeploymentIdentity} from './pages-deployment-identity.mjs';
 
-const SITE='https://reallakshman19.github.io/3D_Converters_v0.35/';
+const SITE='https://reallakshman19.github.io/3D_Converters_v0.45/';
 // Pre-merge smoke verifies live functionality only. Post-release smoke must receive
 // PAGES_EXPECTED_SHA and check it against manifest bytes fetched from the live site.
 const EXPECTED_DEPLOYED=process.env.PAGES_EXPECTED_SHA?.trim()||null;

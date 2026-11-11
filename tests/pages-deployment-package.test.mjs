@@ -15,7 +15,7 @@ if(expectedReleaseSha){
     assert.ok(exists('release-identity.json'),'release manifest omitted from Pages payload');
     const identity=JSON.parse(fs.readFileSync(path.join(stage,'release-identity.json'),'utf8'));
     assert.equal(identity.schema,'xml-cii-production-deployment/v1');
-    assert.equal(identity.repository,'reallakshman19/3D_Converters_v0.35');
+    assert.equal(identity.repository,'reallakshman19/3D_Converters_v0.45');
     assert.equal(identity.commitSha,expectedReleaseSha);
     assert.equal(identity.workflowRunId,process.env.GITHUB_RUN_ID);
     assert.match(identity.workflowRunId,/^\d+$/);
